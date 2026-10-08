@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Connector</title>
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+  <link rel="stylesheet" href="taskpane.css">
+</head>
+<body>
+<div id="settings">
+  <select id="preset"></select>
+  <input id="base" placeholder="Base URL, e.g. https://openrouter.ai/api/v1">
+  <input id="key" type="password" placeholder="API key">
+  <div class="row"><input id="model" list="models" placeholder="Model ID (type or pick)"><button id="load">Load models</button></div>
+  <div class="row"><label><input type="checkbox" id="toolsOnly" checked> Tool-capable only</label><button id="toSheet">Models → sheet</button></div>
+  <small id="status"></small>
+  <datalist id="models"></datalist>
+</div>
+<div id="log"></div>
+<textarea id="input" placeholder="Ask anything about this workbook… (Ctrl+Enter to send)"></textarea>
+<div class="row"><button id="send">Send</button><button id="reset">New chat</button></div>
+<script src="taskpane.js"></script>
+</body>
+</html>
