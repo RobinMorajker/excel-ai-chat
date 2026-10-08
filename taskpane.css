@@ -6,3 +6,7 @@ button{padding:4px 10px;cursor:pointer}
 .msg{white-space:pre-wrap;margin:4px 0;padding:6px;border-radius:6px}
 .user{background:#DDEBF7}.ai{background:#F2F2F2}.tool{color:#7F7F7F;font-size:11px}.error{background:#FCE4E4;color:#C00000}
 textarea{height:70px}
+.acts{display:flex;gap:4px;justify-content:flex-end;align-items:center;margin-top:2px;font-size:11px;color:#595959;white-space:normal}
+.acts button{padding:1px 8px;font-size:11px}
+.acts button[aria-label]{padding:0 7px;font-size:15px;line-height:1}
+.fork{border:1px dashed #2F75B5;background:#F7FBFF;color:#404040}

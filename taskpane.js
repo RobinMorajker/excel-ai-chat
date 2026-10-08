@@ -10,7 +10,12 @@ const $ = (id) => document.getElementById(id);
 const SYSTEM = "You are an expert Excel assistant working inside the user's open workbook. Always read before writing. Prefer formulas over hardcoded numbers. Report briefly what you changed. " +
   "Each user message ends with [Selection: …]: the cells the user had selected in Excel when sending it. Apply the request to that selection unless the message names its own cells, ranges or sheets. " +
   "Named ones take precedence; anything left unnamed (it, this, these, here) still means the selection, and cells named without a sheet are on the selection's sheet.";
-let messages = [], modelCache = [];
+// The chat is a tree of turns. A turn is one prompt and everything the AI did for it: msgs go to the model, shown is what
+// the log displays. kids are the forks that follow a turn and pick is the one on screen. The root holds the system prompt.
+const turn = (parent, msgs) => ({ parent, msgs, shown: [], kids: [], pick: 0 });
+const fresh = () => turn(null, [{ role: "system", content: SYSTEM }]);
+// forkAt: the turn picked with "Fork from here", whose next prompt starts a new fork. busy: the AI is answering.
+let root = fresh(), forkAt = null, busy = false, modelCache = [];
 
 const fn = (name, description, properties = {}, required = []) =>
   ({ type: "function", function: { name, description, parameters: { type: "object", properties, required } } });
@@ -71,9 +76,54 @@ function headers() {
   if (base().includes("azure.com")) h["api-key"] = k;
   return h;
 }
-function show(role, text) {
-  const d = document.createElement("div"); d.className = "msg " + role; d.textContent = text;
-  $("log").appendChild(d); $("log").scrollTop = 1e9;
+// Turns on screen: from the root, follow each turn's picked fork, stopping at a pending "Fork from here".
+function path() { const p = []; for (let n = root; n !== forkAt && n.kids[n.pick]; ) p.push(n = n.kids[n.pick]); return p; }
+// What the model gets for turn n: the system prompt and the turns above n on n's own branch, whatever is on screen.
+const thread = (n) => n ? [...thread(n.parent), ...n.msgs] : [];
+// Record a log entry for turn n; redraw if that turn is on screen.
+function show(n, role, text) { n.shown.push([role, text]); if (path().includes(n)) render(true); }
+
+const el = (tag, cls, text) => { const e = document.createElement(tag); e.className = cls; e.textContent = text; return e; };
+// Edit and Fork are off while the AI answers, so two answers never edit the workbook at once; ‹ › stay on.
+const btn = (text, title, onclick, off = busy) => Object.assign(el("button", "", text), { title, onclick, disabled: off });
+const bar = (...items) => { const d = el("div", "acts", ""); d.append(...items); return d; };
+
+// myopt: redraws the whole branch on every log entry; draw only the new entry if long chats get slow.
+function render(toEnd) {
+  const log = $("log"), top = log.scrollTop, p = path();
+  log.replaceChildren(...p.flatMap((n, i) => [promptBubble(n), ...n.shown.map(([role, text]) => el("div", "msg " + role, text)),
+    ...(i < p.length - 1 ? [bar(btn("Fork from here", "Start a new fork after this answer; this branch stays",
+      () => { forkAt = n; render(true); $("input").focus(); }))] : [])]),
+    ...(forkAt ? [pending()] : []));
+  log.scrollTop = toEnd ? 1e9 : top;
+  $("send").disabled = busy;
+}
+
+// A prompt bubble: its text, ‹ i/n › when other forks start at the same point, and Edit.
+function promptBubble(n) {
+  const d = el("div", "msg user", n.msgs[0].content), all = n.parent.kids, i = all.indexOf(n);
+  const go = (j, text, label) => { const b = btn(text, label, () => { n.parent.pick = j; forkAt = null; render(); }, j < 0 || j === all.length);
+    b.setAttribute("aria-label", label); return b; };
+  d.append(bar(...(all.length > 1 ? [go(i - 1, "‹", "Previous fork"), `${i + 1}/${all.length}`, go(i + 1, "›", "Next fork")] : []),
+    btn("Edit", "Edit this prompt: the edit becomes a new fork and this one stays", () => edit(n, d))));
+  return d;
+}
+
+// Swap prompt n's bubble d for a box holding exactly what the model got, [Selection: …] tag included.
+// Send asks it as a new fork beside n; Cancel or Esc puts the bubble back.
+function edit(n, d) {
+  const box = el("textarea", "", ""), w = el("div", "msg user", ""), go = () => box.value.trim() && ask(n.parent, box.value.trim());
+  box.value = n.msgs[0].content;
+  box.onkeydown = (e) => { if (e.key === "Enter" && e.ctrlKey) go(); if (e.key === "Escape") render(); };
+  w.append(box, bar(btn("Send", "Ask this as a new fork (Ctrl+Enter)", go), btn("Cancel", "Keep the prompt as it is (Esc)", () => render(), false)));
+  d.replaceWith(w); box.focus();
+}
+
+// Shown after "Fork from here" until the next prompt is sent.
+function pending() {
+  const d = el("div", "msg fork", "New fork: your next prompt continues from the answer above.");
+  d.append(bar(btn("Cancel", "Back to the branch you were on", () => { forkAt = null; render(); }, false)));
+  return d;
 }
 function persist() { ["base", "key", "model", "preset"].forEach(k => localStorage.setItem("cai_" + k, $(k).value)); }
 
@@ -88,31 +138,38 @@ async function selection() {
   } catch { return ""; }
 }
 
+// Send the input box. It continues the branch on screen, which ends at the turn picked with "Fork from here" if there is one.
 async function send() {
-  const text = $("input").value.trim(); if (!text) return;
-  $("input").value = ""; persist();
-  if (!messages.length) messages.push({ role: "system", content: SYSTEM });
-  const sel = await selection(), content = sel ? `${text}\n\n[Selection: ${sel}]` : text;
-  messages.push({ role: "user", content }); show("user", content);
-  $("send").disabled = true;
+  const text = $("input").value.trim(); if (!text || busy) return;
+  $("input").value = "";
+  await ask(path().at(-1) || root, text);
+}
+
+// Add prompt text as a new turn under parent (a new fork when parent already has a follow-up) and let the AI answer it.
+async function ask(parent, text) {
+  if (busy) return; busy = true; persist();
+  // Text already ending in [Selection: …] (an edited prompt keeps its tag) goes as is; otherwise tag what is selected now.
+  const sel = /\[Selection: [^\]]*\]$/.test(text) ? "" : await selection(), content = sel ? `${text}\n\n[Selection: ${sel}]` : text;
+  const n = turn(parent, [{ role: "user", content }]);
+  parent.pick = parent.kids.push(n) - 1; forkAt = null; render(true);
   try {
     for (let i = 0; i < 20; i++) {
       const res = await fetch(base() + "/chat/completions", { method: "POST", headers: headers(),
-        body: JSON.stringify({ model: $("model").value.trim(), messages, tools: TOOLS }) });
-      if (!res.ok) { show("error", res.status + ": " + (await res.text()).slice(0, 500)); break; }
+        body: JSON.stringify({ model: $("model").value.trim(), messages: thread(n), tools: TOOLS }) });
+      if (!res.ok) { show(n, "error", res.status + ": " + (await res.text()).slice(0, 500)); break; }
       const msg = (await res.json()).choices[0].message;
-      messages.push({ role: "assistant", content: msg.content ?? "", tool_calls: msg.tool_calls });
-      if (msg.content) show("ai", msg.content);
+      n.msgs.push({ role: "assistant", content: msg.content ?? "", tool_calls: msg.tool_calls });
+      if (msg.content) show(n, "ai", msg.content);
       if (!msg.tool_calls?.length) break;
       for (const tc of msg.tool_calls) {
-        show("tool", "⚙ " + tc.function.name + " " + tc.function.arguments);
+        show(n, "tool", "⚙ " + tc.function.name + " " + tc.function.arguments);
         let out; try { out = await runTool(tc.function.name, JSON.parse(tc.function.arguments || "{}")); }
         catch (e) { out = { error: e.message }; }
-        messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify(out).slice(0, 20000) });
+        n.msgs.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify(out).slice(0, 20000) });
       }
     }
-  } catch (e) { show("error", e.message + " (check URL, key, or CORS)"); }
-  $("send").disabled = false;
+  } catch (e) { show(n, "error", e.message + " (check URL, key, or CORS)"); }
+  busy = false; render();
 }
 
 async function loadModels() {
@@ -152,6 +209,6 @@ Office.onReady(() => {
   if (!$("base").value) $("base").value = PRESETS[$("preset").value];
   $("preset").onchange = () => { $("base").value = PRESETS[$("preset").value]; persist(); };
   $("load").onclick = loadModels; $("toSheet").onclick = modelsToSheet; $("send").onclick = send;
-  $("reset").onclick = () => { messages = []; $("log").innerHTML = ""; };
+  $("reset").onclick = () => { root = fresh(); forkAt = null; render(); };
   $("input").onkeydown = (e) => { if (e.key === "Enter" && e.ctrlKey) send(); };
 });
