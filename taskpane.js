@@ -7,7 +7,9 @@ const PRESETS = {
   "LM Studio (local)":"http://localhost:1234/v1","Custom":""
 };
 const $ = (id) => document.getElementById(id);
-const SYSTEM = "You are an expert Excel assistant working inside the user's open workbook. Always read before writing. Prefer formulas over hardcoded numbers. Report briefly what you changed.";
+const SYSTEM = "You are an expert Excel assistant working inside the user's open workbook. Always read before writing. Prefer formulas over hardcoded numbers. Report briefly what you changed. " +
+  "Each user message ends with [Selection: …]: the cells the user had selected in Excel when sending it. Apply the request to that selection unless the message names its own cells, ranges or sheets. " +
+  "Named ones take precedence; anything left unnamed (it, this, these, here) still means the selection, and cells named without a sheet are on the selection's sheet.";
 let messages = [], modelCache = [];
 
 const fn = (name, description, properties = {}, required = []) =>
@@ -75,11 +77,23 @@ function show(role, text) {
 }
 function persist() { ["base", "key", "model", "preset"].forEach(k => localStorage.setItem("cai_" + k, $(k).value)); }
 
+// The cells selected in Excel, e.g. `sheet "Ward 1", B2:D10, F1`; "" when no cells are selected (chart, shape) or Excel can't be read.
+async function selection() {
+  try {
+    return await Excel.run(async (ctx) => {
+      const s = ctx.workbook.getSelectedRanges(); s.areas.load("items/address"); s.worksheet.load("name"); await ctx.sync();
+      // Area addresses carry the sheet ('My Sheet'!B2:D10): keep what follows the last "!", which a cell reference never contains.
+      return `sheet ${JSON.stringify(s.worksheet.name)}, ` + s.areas.items.map(a => a.address.slice(a.address.lastIndexOf("!") + 1)).join(", ");
+    });
+  } catch { return ""; }
+}
+
 async function send() {
   const text = $("input").value.trim(); if (!text) return;
   $("input").value = ""; persist();
   if (!messages.length) messages.push({ role: "system", content: SYSTEM });
-  messages.push({ role: "user", content: text }); show("user", text);
+  const sel = await selection(), content = sel ? `${text}\n\n[Selection: ${sel}]` : text;
+  messages.push({ role: "user", content }); show("user", content);
   $("send").disabled = true;
   try {
     for (let i = 0; i < 20; i++) {
